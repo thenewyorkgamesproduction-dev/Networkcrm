@@ -1,0 +1,9 @@
+{
+  "name": "Network",
+  "short_name": "Network",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f4f1ea",
+  "theme_color": "#171713",
+  "description": "A private relationship operating system"
+}
