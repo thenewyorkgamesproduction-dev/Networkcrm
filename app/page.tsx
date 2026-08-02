@@ -1,8 +1,8 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 
-type Tab = "home" | "import" | "followups" | "health";
+type Tab = "remember" | "search" | "import" | "health";
 type Person = { person_id?: string; name?: string; phone?: string; instagram?: string; summary?: string; importance?: number };
 type SearchResult = { score?: number; person: Person; reasons?: string[]; matching_memories?: Array<{ raw_note?: string }> };
 type Followup = { followup_id: string; task: string; due_date?: string; person?: Person };
@@ -18,61 +18,89 @@ async function crm(action: string, payload: Record<string, unknown> = {}) {
   return data.data;
 }
 
-function looksLikeSearch(value: string) {
-  const text = value.trim().toLowerCase();
-  return text.endsWith("?") || /^(who|show|find|which|people|search|anyone)\b/.test(text);
-}
-
 function copy(value?: string) {
   if (value) navigator.clipboard.writeText(value);
 }
 
 export default function Home() {
-  const [tab, setTab] = useState<Tab>("home");
-  const [command, setCommand] = useState("");
+  const [tab, setTab] = useState<Tab>("remember");
+  const [note, setNote] = useState("");
+  const [query, setQuery] = useState("");
   const [bulk, setBulk] = useState("");
   const [results, setResults] = useState<SearchResult[]>([]);
   const [followups, setFollowups] = useState<Followup[]>([]);
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
+  const [searching, setSearching] = useState(false);
 
-  const mode = useMemo(() => looksLikeSearch(command) ? "Search" : "Remember", [command]);
+  useEffect(() => {
+    if (tab !== "search") return;
+    const value = query.trim();
+    if (!value) {
+      setResults([]);
+      setStatus("");
+      return;
+    }
 
-  async function submitCommand() {
-    if (!command.trim()) return;
-    setBusy(true); setStatus("");
-    try {
-      if (looksLikeSearch(command)) {
-        const data = await crm("search_network", { query: command.replace(/\?$/, ""), limit: 40 });
+    const timer = window.setTimeout(async () => {
+      setSearching(true);
+      setStatus("");
+      try {
+        const data = await crm("search_network", { query: value, limit: 40 });
         setResults(data || []);
         setStatus(`${(data || []).length} people found`);
-      } else {
-        const data = await crm("capture_note", { text: command, source: "web command bar" });
-        const name = data?.person?.name || data?.person?.phone || "person";
-        setStatus(`Saved to ${name} ✓`);
-        setCommand("");
+      } catch (error) {
+        setStatus(error instanceof Error ? error.message : "Search failed");
+      } finally {
+        setSearching(false);
       }
-    } catch (error) { setStatus(error instanceof Error ? error.message : "Something went wrong"); }
-    finally { setBusy(false); }
+    }, 350);
+
+    return () => window.clearTimeout(timer);
+  }, [query, tab]);
+
+  async function remember() {
+    if (!note.trim()) return;
+    setBusy(true);
+    setStatus("");
+    try {
+      const data = await crm("capture_note", { text: note, source: "web remember" });
+      const name = data?.person?.name || data?.person?.phone || "person";
+      setStatus(`Saved to ${name} ✓`);
+      setNote("");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Could not save");
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function importLines() {
     const lines = bulk.split("\n").map(x => x.trim()).filter(Boolean);
     if (!lines.length) return;
-    setBusy(true); setStatus("");
+    setBusy(true);
+    setStatus("");
     try {
       const data = await crm("bulk_capture", { lines, source: "bulk paste" });
       setStatus(`Processed ${data?.processed || lines.length} contacts ✓`);
       setBulk("");
-    } catch (error) { setStatus(error instanceof Error ? error.message : "Import failed"); }
-    finally { setBusy(false); }
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Import failed");
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function loadFollowups() {
-    setBusy(true); setStatus("");
-    try { setFollowups(await crm("get_followups", { status: "Open", limit: 100 }) || []); }
-    catch (error) { setStatus(error instanceof Error ? error.message : "Could not load follow-ups"); }
-    finally { setBusy(false); }
+    setBusy(true);
+    setStatus("");
+    try {
+      setFollowups(await crm("get_followups", { status: "Open", limit: 100 }) || []);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Could not load follow-ups");
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function complete(id: string) {
@@ -80,25 +108,42 @@ export default function Home() {
     setFollowups(current => current.filter(item => item.followup_id !== id));
   }
 
+  function openTab(next: Tab) {
+    setTab(next);
+    setStatus("");
+    if (next === "health") loadFollowups();
+  }
+
   return (
     <main className="shell">
       <header className="header">
         <div><p className="eyebrow">PRIVATE NETWORK OS</p><h1>Network</h1></div>
         <nav>
-          <button className={tab === "home" ? "active" : ""} onClick={() => setTab("home")}>Home</button>
-          <button className={tab === "import" ? "active" : ""} onClick={() => setTab("import")}>Import</button>
-          <button className={tab === "followups" ? "active" : ""} onClick={() => { setTab("followups"); loadFollowups(); }}>Follow-ups</button>
-          <button className={tab === "health" ? "active" : ""} onClick={() => setTab("health")}>Health</button>
+          <button className={tab === "remember" ? "active" : ""} onClick={() => openTab("remember")}>Remember</button>
+          <button className={tab === "search" ? "active" : ""} onClick={() => openTab("search")}>Search</button>
+          <button className={tab === "import" ? "active" : ""} onClick={() => openTab("import")}>Import</button>
+          <button className={tab === "health" ? "active" : ""} onClick={() => openTab("health")}>Health</button>
         </nav>
       </header>
 
-      {tab === "home" && <>
-        <section className="hero card">
-          <div className="mode">{mode}</div>
-          <textarea value={command} onChange={e => setCommand(e.target.value)} placeholder="Remember or ask anything…\n\nChloe really likes Werewolf and wants coworking\nWho should I invite to Werewolf?" />
-          <div className="commandFooter"><span>{command.length} characters</span><button className="primary" disabled={!command.trim() || busy} onClick={submitCommand}>{busy ? "Working…" : mode}</button></div>
-          {status && <p className="status">{status}</p>}
+      {tab === "remember" && <section className="hero card">
+        <div className="mode">Remember</div>
+        <h2>What do you want to remember?</h2>
+        <p className="muted">Brain-dump the story. Names, numbers, handles, interests, context, and promises can all live in one sentence.</p>
+        <textarea value={note} onChange={e => setNote(e.target.value)} placeholder="Jane likes poker and wants to come to game night\n\nChloe is a founder, close friends with Kieran, and would be great for creator coworking" />
+        <div className="commandFooter"><span>{note.length} characters</span><button className="primary" disabled={!note.trim() || busy} onClick={remember}>{busy ? "Saving…" : "Remember"}</button></div>
+        {status && <p className="status">{status}</p>}
+      </section>}
+
+      {tab === "search" && <>
+        <section className="card searchPanel">
+          <div className="mode">Search</div>
+          <h2>Search your network</h2>
+          <input className="searchInput" autoFocus value={query} onChange={e => setQuery(e.target.value)} placeholder="poker, coworking, founders, who likes Werewolf…" />
+          <div className="searchMeta"><span>{searching ? "Searching…" : status || "Results update as you type"}</span></div>
         </section>
+
+        {query.trim() && !searching && results.length === 0 && <div className="empty card">No matches yet. Try a broader topic or remember someone with this interest.</div>}
 
         {results.length > 0 && <section className="results">
           <div className="sectionTitle"><h2>Best matches</h2><span>{results.length}</span></div>
@@ -134,17 +179,15 @@ export default function Home() {
         {status && <p className="status">{status}</p>}
       </section>}
 
-      {tab === "followups" && <section>
+      {tab === "health" && <section>
+        <section className="card health">
+          <p className="eyebrow">GAMIFICATION</p><h2>Network Health</h2><div className="healthScore">—</div>
+          <p>Your score will reward useful behavior rather than busywork:</p>
+          <ul><li>Logging context about someone</li><li>Adding missing phone or Instagram information</li><li>Inviting a strong-fit person</li><li>Following up with an important relationship</li><li>Recording a meaningful connection between two people</li></ul>
+        </section>
         <div className="sectionTitle"><div><p className="eyebrow">RELATIONSHIP MOMENTUM</p><h2>Open follow-ups</h2></div><button onClick={loadFollowups}>Refresh</button></div>
         {!followups.length && <div className="empty card">Nothing due right now.</div>}
         {followups.map(item => <article className="task card" key={item.followup_id}><div><h3>{item.person?.name || item.person?.phone || "Unknown person"}</h3><p>{item.task}</p><small>{item.due_date || "No due date"}</small></div><button onClick={() => complete(item.followup_id)}>Done</button></article>)}
-      </section>}
-
-      {tab === "health" && <section className="card health">
-        <p className="eyebrow">GAMIFICATION</p><h2>Network Health</h2><div className="healthScore">—</div>
-        <p>Your score will reward useful behavior rather than busywork:</p>
-        <ul><li>Logging context about someone</li><li>Adding missing phone or Instagram information</li><li>Inviting a strong-fit person</li><li>Following up with an important relationship</li><li>Recording a meaningful connection between two people</li></ul>
-        <p className="muted">The first version will calculate this after invitation and connection tracking are active.</p>
       </section>}
     </main>
   );
