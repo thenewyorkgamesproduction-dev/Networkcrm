@@ -1,194 +1,40 @@
 "use client";
+import { useEffect, useMemo, useState } from "react";
 
-import { useEffect, useState } from "react";
+type Tab="dashboard"|"remember"|"search"|"people"|"lists"|"import"|"dev";
+type Person={person_id:string;name?:string;phone?:string;email?:string;instagram?:string;summary?:string;company?:string;role?:string;where_met?:string};
+type Interest={topic:string;strength:number;count?:number;evidence?:string[]};
+type Enriched={person:Person;relationship_score:number;interests:Interest[];memories_count:number;connections_count:number;last_memory?:{raw_note?:string;date?:string}|null};
+type SearchResult={score:number;person:Person;relationship_score?:number;interests?:Interest[];reasons?:string[];matching_memories?:Array<{raw_note?:string}>};
+type Stats={people:number;memories:number;interests:number;signals:number;connections:number;lists:number;events:number;average_relationship_score:number;missing_phone:number;missing_instagram:number;strong_relationships:number};
+type Profile=Enriched&{memories:Array<{memory_id:string;raw_note?:string;date?:string}>;connections:Array<{connection_id:string;relationship?:string;other_person?:Person}>};
 
-type Tab = "remember" | "search" | "import" | "health";
-type Person = { person_id?: string; name?: string; phone?: string; instagram?: string; summary?: string; importance?: number };
-type SearchResult = { score?: number; person: Person; reasons?: string[]; matching_memories?: Array<{ raw_note?: string }> };
-type Followup = { followup_id: string; task: string; due_date?: string; person?: Person };
+async function crm(action:string,payload:Record<string,unknown>={}){const r=await fetch('/api/crm',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,payload})});const d=await r.json();if(!d.ok)throw new Error(d.error||'Request failed');return d.data;}
+function pct(n:number){return Math.round((Math.max(0,Math.min(5,n))/5)*100)}
+function initials(name?:string){return (name||'?').split(/\s+/).slice(0,2).map(x=>x[0]).join('').toUpperCase()}
+function PersonCard({item,onOpen}:{item:Enriched,onOpen:(id:string)=>void}){return <button className="galleryCard" onClick={()=>onOpen(item.person.person_id)}><div className="avatar">{initials(item.person.name)}</div><div className="galleryTop"><div><h3>{item.person.name||'Unknown'}</h3><p>{item.person.instagram||item.person.role||'No handle yet'}</p></div><div className="relationship"><strong>{item.relationship_score}</strong><span>relationship</span></div></div><div className="chips">{item.interests.slice(0,4).map(i=><span key={i.topic}>{i.topic} {pct(i.strength)}</span>)}</div><p className="story">{item.last_memory?.raw_note||item.person.summary||'Add a memory to start their story.'}</p><div className="cardMeta"><span>{item.memories_count} memories</span><span>{item.connections_count} connections</span></div></button>}
 
-async function crm(action: string, payload: Record<string, unknown> = {}) {
-  const response = await fetch("/api/crm", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ action, payload }),
-  });
-  const data = await response.json();
-  if (!data.ok) throw new Error(data.error || "Request failed");
-  return data.data;
-}
-
-function copy(value?: string) {
-  if (value) navigator.clipboard.writeText(value);
-}
-
-export default function Home() {
-  const [tab, setTab] = useState<Tab>("remember");
-  const [note, setNote] = useState("");
-  const [query, setQuery] = useState("");
-  const [bulk, setBulk] = useState("");
-  const [results, setResults] = useState<SearchResult[]>([]);
-  const [followups, setFollowups] = useState<Followup[]>([]);
-  const [status, setStatus] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [searching, setSearching] = useState(false);
-
-  useEffect(() => {
-    if (tab !== "search") return;
-    const value = query.trim();
-    if (!value) {
-      setResults([]);
-      setStatus("");
-      return;
-    }
-
-    const timer = window.setTimeout(async () => {
-      setSearching(true);
-      setStatus("");
-      try {
-        const data = await crm("search_network", { query: value, limit: 40 });
-        setResults(data || []);
-        setStatus(`${(data || []).length} people found`);
-      } catch (error) {
-        setStatus(error instanceof Error ? error.message : "Search failed");
-      } finally {
-        setSearching(false);
-      }
-    }, 350);
-
-    return () => window.clearTimeout(timer);
-  }, [query, tab]);
-
-  async function remember() {
-    if (!note.trim()) return;
-    setBusy(true);
-    setStatus("");
-    try {
-      const data = await crm("capture_note", { text: note, source: "web remember" });
-      const name = data?.person?.name || data?.person?.phone || "person";
-      setStatus(`Saved to ${name} ✓`);
-      setNote("");
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Could not save");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function importLines() {
-    const lines = bulk.split("\n").map(x => x.trim()).filter(Boolean);
-    if (!lines.length) return;
-    setBusy(true);
-    setStatus("");
-    try {
-      const data = await crm("bulk_capture", { lines, source: "bulk paste" });
-      setStatus(`Processed ${data?.processed || lines.length} contacts ✓`);
-      setBulk("");
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Import failed");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function loadFollowups() {
-    setBusy(true);
-    setStatus("");
-    try {
-      setFollowups(await crm("get_followups", { status: "Open", limit: 100 }) || []);
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Could not load follow-ups");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function complete(id: string) {
-    await crm("complete_followup", { followup_id: id });
-    setFollowups(current => current.filter(item => item.followup_id !== id));
-  }
-
-  function openTab(next: Tab) {
-    setTab(next);
-    setStatus("");
-    if (next === "health") loadFollowups();
-  }
-
-  return (
-    <main className="shell">
-      <header className="header">
-        <div><p className="eyebrow">PRIVATE NETWORK OS</p><h1>Network</h1></div>
-        <nav>
-          <button className={tab === "remember" ? "active" : ""} onClick={() => openTab("remember")}>Remember</button>
-          <button className={tab === "search" ? "active" : ""} onClick={() => openTab("search")}>Search</button>
-          <button className={tab === "import" ? "active" : ""} onClick={() => openTab("import")}>Import</button>
-          <button className={tab === "health" ? "active" : ""} onClick={() => openTab("health")}>Health</button>
-        </nav>
-      </header>
-
-      {tab === "remember" && <section className="hero card">
-        <div className="mode">Remember</div>
-        <h2>What do you want to remember?</h2>
-        <p className="muted">Brain-dump the story. Names, numbers, handles, interests, context, and promises can all live in one sentence.</p>
-        <textarea value={note} onChange={e => setNote(e.target.value)} placeholder="Jane likes poker and wants to come to game night\n\nChloe is a founder, close friends with Kieran, and would be great for creator coworking" />
-        <div className="commandFooter"><span>{note.length} characters</span><button className="primary" disabled={!note.trim() || busy} onClick={remember}>{busy ? "Saving…" : "Remember"}</button></div>
-        {status && <p className="status">{status}</p>}
-      </section>}
-
-      {tab === "search" && <>
-        <section className="card searchPanel">
-          <div className="mode">Search</div>
-          <h2>Search your network</h2>
-          <input className="searchInput" autoFocus value={query} onChange={e => setQuery(e.target.value)} placeholder="poker, coworking, founders, who likes Werewolf…" />
-          <div className="searchMeta"><span>{searching ? "Searching…" : status || "Results update as you type"}</span></div>
-        </section>
-
-        {query.trim() && !searching && results.length === 0 && <div className="empty card">No matches yet. Try a broader topic or remember someone with this interest.</div>}
-
-        {results.length > 0 && <section className="results">
-          <div className="sectionTitle"><h2>Best matches</h2><span>{results.length}</span></div>
-          {results.map((result, index) => {
-            const p = result.person || {};
-            const evidence = result.reasons?.[0] || result.matching_memories?.[0]?.raw_note || p.summary;
-            return <article className="personCard" key={p.person_id || index}>
-              <div className="rank">{index + 1}</div>
-              <div className="personMain">
-                <div className="personHeading"><div><h3>{p.name || "Unknown person"}</h3><p>{p.instagram || "No Instagram"}</p></div><div className="score">{Math.round(result.score || p.importance || 0)}</div></div>
-                <div className="copyGrid">
-                  <button onClick={() => copy(p.name)}><small>Name</small>{p.name || "—"}</button>
-                  <button onClick={() => copy(p.instagram)}><small>Instagram</small>{p.instagram || "—"}</button>
-                  <button onClick={() => copy(p.phone)}><small>Phone</small>{p.phone || "—"}</button>
-                </div>
-                {evidence && <div className="evidence"><strong>Why this matched</strong><p>{evidence}</p></div>}
-                <div className="actions">
-                  {p.phone && <a href={`sms:${p.phone}`}>Text</a>}
-                  {p.phone && <a href={`tel:${p.phone}`}>Call</a>}
-                  {p.instagram && <a target="_blank" href={`https://instagram.com/${p.instagram.replace("@", "")}`}>Instagram</a>}
-                </div>
-              </div>
-            </article>;
-          })}
-        </section>}
-      </>}
-
-      {tab === "import" && <section className="card">
-        <p className="eyebrow">BULK CAPTURE</p><h2>Paste one person per line</h2>
-        <p className="muted">Phone or Instagram updates a unique existing person. Otherwise a new person is created. Raw context is always preserved.</p>
-        <textarea className="bulk" value={bulk} onChange={e => setBulk(e.target.value)} placeholder="Chloe, 917-555-0123, really likes Werewolf, @chloepoker\nKieran, founder, creator, close friend of Chloe\n646-555-0198, wants coworking, important" />
-        <button className="primary wide" disabled={!bulk.trim() || busy} onClick={importLines}>{busy ? "Importing…" : "Import contacts"}</button>
-        {status && <p className="status">{status}</p>}
-      </section>}
-
-      {tab === "health" && <section>
-        <section className="card health">
-          <p className="eyebrow">GAMIFICATION</p><h2>Network Health</h2><div className="healthScore">—</div>
-          <p>Your score will reward useful behavior rather than busywork:</p>
-          <ul><li>Logging context about someone</li><li>Adding missing phone or Instagram information</li><li>Inviting a strong-fit person</li><li>Following up with an important relationship</li><li>Recording a meaningful connection between two people</li></ul>
-        </section>
-        <div className="sectionTitle"><div><p className="eyebrow">RELATIONSHIP MOMENTUM</p><h2>Open follow-ups</h2></div><button onClick={loadFollowups}>Refresh</button></div>
-        {!followups.length && <div className="empty card">Nothing due right now.</div>}
-        {followups.map(item => <article className="task card" key={item.followup_id}><div><h3>{item.person?.name || item.person?.phone || "Unknown person"}</h3><p>{item.task}</p><small>{item.due_date || "No due date"}</small></div><button onClick={() => complete(item.followup_id)}>Done</button></article>)}
-      </section>}
-    </main>
-  );
-}
+export default function Home(){
+ const[tab,setTab]=useState<Tab>('dashboard'),[note,setNote]=useState(''),[query,setQuery]=useState(''),[bulk,setBulk]=useState(''),[status,setStatus]=useState(''),[busy,setBusy]=useState(false),[stats,setStats]=useState<Stats|null>(null),[people,setPeople]=useState<Enriched[]>([]),[results,setResults]=useState<SearchResult[]>([]),[profile,setProfile]=useState<Profile|null>(null),[lists,setLists]=useState<Array<{list_id:string;name:string;topic?:string;member_count:number}>>([]),[diag,setDiag]=useState<any>(null),[quick,setQuick]=useState(''),[quickKind,setQuickKind]=useState<'memory'|'interest'>('memory');
+ const filtered=useMemo(()=>{const q=query.trim().toLowerCase();return q?people.filter(x=>[x.person.name,x.person.instagram,x.person.phone,x.person.summary,x.interests.map(i=>i.topic).join(' ')].join(' ').toLowerCase().includes(q)):people},[people,query]);
+ async function refresh(){const [s,p,l]=await Promise.all([crm('stats'),crm('list_people',{limit:500}),crm('list_lists')]);setStats(s);setPeople(p||[]);setLists(l||[])}
+ useEffect(()=>{refresh().catch(e=>setStatus(e.message))},[]);
+ useEffect(()=>{if(tab!=='search'||!query.trim()){setResults([]);return}const t=setTimeout(()=>crm('search_network',{query,limit:100}).then(d=>setResults(d||[])).catch(e=>setStatus(e.message)),250);return()=>clearTimeout(t)},[query,tab]);
+ async function remember(){if(!note.trim())return;setBusy(true);try{const d=await crm('capture_note',{text:note,source:'web remember'});setStatus(`Saved to ${d.person?.name||'person'} ✓`);setNote('');await refresh()}catch(e){setStatus(e instanceof Error?e.message:'Save failed')}finally{setBusy(false)}}
+ async function importLines(){const lines=bulk.split('\n').map(x=>x.trim()).filter(Boolean);if(!lines.length)return;setBusy(true);try{const d=await crm('bulk_capture',{lines});setStatus(`Processed ${d.processed} contacts ✓`);setBulk('');await refresh()}catch(e){setStatus(e instanceof Error?e.message:'Import failed')}finally{setBusy(false)}}
+ async function openProfile(id:string){setProfile(await crm('get_person',{person_id:id}))}
+ async function addQuick(){if(!profile||!quick.trim())return;const payload:any={person_id:profile.person.person_id,kind:quickKind};if(quickKind==='memory')payload.value=quick;else{payload.topic=quick;payload.strength=3}await crm('quick_add',payload);setQuick('');await openProfile(profile.person.person_id);await refresh()}
+ async function createList(){const name=prompt('List name, e.g. Werewolf Crew');if(!name)return;const topic=prompt('Topic used for ranking, e.g. werewolf')||'';await crm('create_list',{name,topic});setLists(await crm('list_lists'))}
+ async function loadDiag(){setDiag(await crm('diagnostics'))}
+ const nav=(t:Tab,label:string)=><button className={tab===t?'active':''} onClick={()=>{setTab(t);setStatus('');if(t==='dev')loadDiag()}}>{label}</button>;
+ return <main className="shell"><header className="header"><div><p className="eyebrow">PRIVATE NETWORK OS · V0.2</p><h1>Network</h1></div><nav>{nav('dashboard','Home')}{nav('remember','Remember')}{nav('search','Search')}{nav('people','People')}{nav('lists','Lists')}{nav('import','Import')}{nav('dev','Status')}</nav></header>
+ {status&&<p className="status globalStatus">{status}</p>}
+ {tab==='dashboard'&&<><section className="heroBanner"><p className="eyebrow">NETWORK HEALTH</p><div className="healthRow"><strong>{stats?.average_relationship_score??0}</strong><div><h2>Your network is becoming more useful.</h2><p>Keep adding stories, interests and connections.</p></div></div></section><section className="statGrid">{[['People',stats?.people],['Memories',stats?.memories],['Known interests',stats?.interests],['Connections',stats?.connections],['Strong relationships',stats?.strong_relationships],['Missing Instagram',stats?.missing_instagram]].map(([l,v])=><article className="statCard" key={String(l)}><strong>{v??0}</strong><span>{l}</span></article>)}</section><div className="sectionTitle"><h2>Top relationships</h2><button onClick={()=>setTab('people')}>View all</button></div><section className="gallery">{people.slice(0,6).map(x=><PersonCard key={x.person.person_id} item={x} onOpen={openProfile}/>)}</section></>}
+ {tab==='remember'&&<section className="card hero"><div className="mode">Remember</div><h2>Tell the story naturally.</h2><p className="muted">Existing people update automatically when their name, phone or Instagram matches.</p><textarea value={note} onChange={e=>setNote(e.target.value)} placeholder="Sharon moved to Brooklyn and really loves poker. She would be great for founder game night."/><div className="commandFooter"><span>{note.length} characters</span><button className="primary" disabled={!note.trim()||busy} onClick={remember}>{busy?'Saving…':'Remember'}</button></div></section>}
+ {tab==='search'&&<><section className="card searchPanel"><h2>Search names, stories and interests</h2><input className="searchInput" autoFocus value={query} onChange={e=>setQuery(e.target.value)} placeholder="Sharon, poker, founders, coworking…"/><p className="muted">{query?`${results.length} matches`:'Start typing to search.'}</p></section><section className="gallery">{results.map(r=><PersonCard key={r.person.person_id} onOpen={openProfile} item={{person:r.person,relationship_score:r.relationship_score||0,interests:r.interests||[],memories_count:r.matching_memories?.length||0,connections_count:0,last_memory:r.matching_memories?.[0]||null}}/>)}</section>{query&&results.length===0&&<div className="empty card">No matches yet.</div>}</>}
+ {tab==='people'&&<><section className="toolbar"><input className="searchInput" value={query} onChange={e=>setQuery(e.target.value)} placeholder="Filter all contacts…"/><span>{filtered.length} people</span></section><section className="gallery">{filtered.map(x=><PersonCard key={x.person.person_id} item={x} onOpen={openProfile}/>)}</section></>}
+ {tab==='lists'&&<><div className="sectionTitle"><div><p className="eyebrow">INVITE LISTS</p><h2>Build rooms, not spreadsheets</h2></div><button className="primary" onClick={createList}>New list</button></div><section className="listGrid">{lists.map(l=><article className="card" key={l.list_id}><h3>{l.name}</h3><p>{l.topic||'No topic yet'}</p><strong>{l.member_count} people</strong></article>)}</section><section className="card"><h3>Coming next in this module</h3><p className="muted">Auto-ranked candidates, one-tap invite status and post-event feedback that updates fit scores.</p></section></>}
+ {tab==='import'&&<section className="card"><p className="eyebrow">BULK CAPTURE</p><h2>One person per line</h2><textarea className="bulk" value={bulk} onChange={e=>setBulk(e.target.value)} placeholder="Jane Doe, 917-555-0123, loves werewolf, @jane\nSharon, founder, likes poker"/><button className="primary wide" disabled={!bulk.trim()||busy} onClick={importLines}>Import contacts</button></section>}
+ {tab==='dev'&&<section className="card"><div className="sectionTitle"><h2>System status</h2><button onClick={loadDiag}>Refresh</button></div>{diag?<pre className="diagnostics">{JSON.stringify(diag,null,2)}</pre>:<p>Loading…</p>}</section>}
+ {profile&&<div className="modalBackdrop" onClick={()=>setProfile(null)}><section className="profileModal" onClick={e=>e.stopPropagation()}><button className="close" onClick={()=>setProfile(null)}>×</button><div className="profileHero"><div className="avatar large">{initials(profile.person.name)}</div><div><h2>{profile.person.name||'Unknown'}</h2><p>{profile.person.instagram||profile.person.phone||'Add contact info'}</p></div><div className="relationship big"><strong>{profile.relationship_score}</strong><span>relationship</span></div></div><div className="chips">{profile.interests.map(i=><span key={i.topic}>{i.topic} {pct(i.strength)}</span>)}</div><div className="quickBox"><select value={quickKind} onChange={e=>setQuickKind(e.target.value as any)}><option value="memory">Memory</option><option value="interest">Interest</option></select><input value={quick} onChange={e=>setQuick(e.target.value)} placeholder={quickKind==='memory'?'Add to their story…':'Add an interest…'}/><button onClick={addQuick}>Add</button></div><h3>Story</h3><div className="timeline">{profile.memories.map(m=><article key={m.memory_id}><time>{m.date?new Date(m.date).toLocaleDateString():''}</time><p>{m.raw_note}</p></article>)}</div><h3>Connections</h3>{profile.connections.length?profile.connections.map(c=><p key={c.connection_id}>{c.other_person?.name||'Unknown'} · {c.relationship||'Connected'}</p>):<p className="muted">No connections logged yet.</p>}</section></div>}
+ </main>}
