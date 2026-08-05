@@ -1,200 +1,56 @@
 import { NextRequest, NextResponse } from "next/server";
+import { randomUUID } from "crypto";
+import { getSupabaseAdmin } from "@/lib/supabase/admin";
 
-type CrmBody = {
-  action?: string;
-  payload?: Record<string, unknown>;
-};
+type Payload = Record<string, any>;
+const clamp=(n:any)=>Math.max(0,Math.min(100,Math.round(Number(n)||0)));
+const clean=(v:any)=>String(v??"").trim();
+const norm=(v:any)=>clean(v).toLowerCase().replace(/[’]/g,"'");
+const id=(prefix:string)=>`${prefix}_${randomUUID()}`;
+const topicAliases:Record<string,string[]>={poker:["poker","holdem","hold'em","texas hold"],werewolf:["werewolf","mafia game"],games:["game night","board game","boardgame"],creator:["creator","content creator","influencer","youtube","tiktok"],founder:["founder","cofounder","co-founder","entrepreneur","startup"],community:["community builder","organizer","host"],marketing:["marketing","growth","brand strategy"],film:["film","filmmaker","cinema","movie"],chess:["chess"],volleyball:["volleyball"]};
 
-type CacheEntry = {
-  data: unknown;
-  expiresAt: number;
-  staleUntil: number;
-};
-
-const globalCache = globalThis as typeof globalThis & {
-  __networkCrmCache?: Map<string, CacheEntry>;
-  __networkCrmInflight?: Map<string, Promise<unknown>>;
-};
-
-const responseCache = globalCache.__networkCrmCache ?? new Map<string, CacheEntry>();
-const inflight = globalCache.__networkCrmInflight ?? new Map<string, Promise<unknown>>();
-globalCache.__networkCrmCache = responseCache;
-globalCache.__networkCrmInflight = inflight;
-
-const READ_TTL: Record<string, number> = {
-  list_people: 5 * 60_000,
-  stats: 5 * 60_000,
-  list_lists: 2 * 60_000,
-  get_person: 5 * 60_000,
-  get_list: 2 * 60_000,
-  topic_scores: 5 * 60_000,
-  find_duplicates: 2 * 60_000,
-  recommend_people: 2 * 60_000,
-  list_events: 2 * 60_000,
-  diagnostics: 60_000,
-};
-
-const MUTATIONS = new Set([
-  "capture_note",
-  "bulk_capture",
-  "quick_add",
-  "edit_person",
-  "set_affinity",
-  "clear_affinity_override",
-  "recalculate_intelligence",
-  "create_connection",
-  "create_list",
-  "add_to_list",
-  "create_event",
-  "add_event_feedback",
-]);
-
-function normalizeSearchQuery(value: unknown) {
-  const text = String(value || "").toLowerCase().replace(/[?.,!]/g, " ");
-  const stopWords = new Set([
-    "who", "what", "which", "where", "when", "why", "how",
-    "should", "could", "would", "can", "do", "does", "did",
-    "i", "me", "my", "we", "our", "the", "a", "an", "to", "for",
-    "is", "are", "was", "were", "be", "been", "being",
-    "like", "likes", "liked", "love", "loves", "enjoy", "enjoys",
-    "invite", "invited", "show", "find", "search", "people", "person",
-    "anyone", "someone", "contacts", "contact"
-  ]);
-
-  const meaningful = text
-    .split(/\s+/)
-    .map(word => word.trim())
-    .filter(word => word && !stopWords.has(word));
-
-  return meaningful.join(" ") || text.trim();
+function topicFromText(text:string){const lower=norm(text);for(const [topic,aliases] of Object.entries(topicAliases))if(aliases.some(a=>lower.includes(a)))return topic;return lower.split(/\s+/).find(x=>x.length>2)||"";}
+function nameFromNote(text:string){const first=text.split(/[,.!?;\n]/)[0].trim();const cue=first.search(/\b(loves?|likes?|hates?|enjoys?|plays?|hosts?|is|works?|met|wants?)\b/i);const candidate=(cue>0?first.slice(0,cue):first).trim();return /^[A-Za-z][A-Za-z'.-]*(?:\s+[A-Za-z][A-Za-z'.-]*){0,3}$/.test(candidate)?candidate:"Unknown";}
+function evidenceFor(text:string,topic:string){const t=norm(text);const negative=/\b(hates?|dislikes?|doesn't like|does not like|not interested|no longer|used to)\b/.test(t);let enthusiasm=28,behavior=15,specificity=45,certainty=82,evidenceType="mention";
+ if(/obsessed|favorite|passion|absolutely loves|lives for/.test(t)){enthusiasm=98;evidenceType="direct_preference";}
+ else if(/\bloves?\b|huge fan|very into/.test(t)){enthusiasm=92;evidenceType="direct_preference";}
+ else if(/really likes|really enjoys|very interested/.test(t)){enthusiasm=82;evidenceType="direct_preference";}
+ else if(/\blikes?\b|\benjoys?\b/.test(t)){enthusiasm=70;evidenceType="stated_interest";}
+ else if(/interested|wants to learn|wants to try/.test(t)){enthusiasm=52;evidenceType="curiosity";}
+ if(/hosts?|plays every|weekly|every week|tournament|competes|teaches/.test(t)){behavior=96;specificity=92;evidenceType="demonstrated_behavior";}
+ else if(/regularly|plays often|attended multiple|comes to every/.test(t)){behavior=84;specificity=82;}
+ else if(/played|attended|joined|participated/.test(t)){behavior=62;specificity=70;}
+ if(/maybe|might|possibly|i think|probably|seems/.test(t))certainty=50;
+ const base=enthusiasm*.52+behavior*.24+specificity*.12+certainty*.12;
+ let score=clamp(base);
+ if(evidenceType==="direct_preference")score=Math.max(score,90);
+ if(enthusiasm>=98)score=Math.max(score,96);
+ if(behavior>=90)score=Math.max(score,95);
+ if(negative)score=Math.min(score,15);
+ return {topic,score,confidence:clamp(certainty*.65+specificity*.2+Math.max(enthusiasm,behavior)*.15),enthusiasm,behavior,specificity,certainty,polarity:negative?-1:1,evidence_type:evidenceType};
 }
-
-function stableValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(stableValue);
-  if (value && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>)
-        .sort(([a], [b]) => a.localeCompare(b))
-        .map(([key, item]) => [key, stableValue(item)])
-    );
-  }
-  return value;
+function affinityFor(person:any,memoryCount:number){const text=norm(`${person.summary||""} ${person.importance_reason||""}`);let closeness=28,enthusiasm=35;
+ if(/best friend|closest friend|family to me|trust completely/.test(text))closeness=96;else if(/close friend|good friend|really trust|must invite/.test(text))closeness=84;else if(/friend|great person|strong relationship/.test(text))closeness=66;
+ if(/incredible person|one of my favorite|absolutely amazing/.test(text))enthusiasm=95;else if(/amazing|really like|great energy|love working with/.test(text))enthusiasm=80;
+ const interaction=Math.min(100,20+memoryCount*15),strategic=Math.min(100,(Number(person.importance)||0)*15+(Number(person.instagram_followers)>=10000?20:0));
+ return {score:clamp(closeness*.35+enthusiasm*.25+interaction*.25+strategic*.15),confidence:clamp(35+memoryCount*12),reasons:[closeness>=80?"Strong closeness language":"",enthusiasm>=80?"Strong positive enthusiasm":"",memoryCount>=3?"Repeated relationship evidence":""].filter(Boolean)};
 }
+function personShape(p:any,topics:any[]=[],memoryCount=0,lastMemory:any=null,connections=0){const affinity=p.affinity_override??p.computed_affinity??0;const interests=topics.map(t=>({topic:t.topic,score:t.score,strength:t.score/20,confidence:t.confidence,evidence:Array.isArray(t.explanation)?t.explanation:[]}));return {person:{person_id:p.id,name:p.name,phone:p.phone,email:p.email,instagram:p.instagram,instagram_followers:p.instagram_followers,company:p.company,role:p.role,where_met:p.where_met,summary:p.summary,last_contact:p.last_contact,affinity_override:p.affinity_override,affinity_score:affinity},affinity_score:affinity,computed_affinity:p.computed_affinity,affinity_confidence:p.affinity_confidence,affinity_reasons:p.affinity_reasons||[],relationship_score:affinity,interests,topic_scores:interests,memories_count:memoryCount,connections_count:connections,last_memory:lastMemory};}
 
-function cacheKey(body: CrmBody) {
-  return JSON.stringify(stableValue({ action: body.action, payload: body.payload || {} }));
-}
+async function listPeople(p:Payload){const db=getSupabaseAdmin();const limit=Math.min(Number(p.limit)||500,500);const {data:people,error}=await db.from("people").select("*").order("computed_affinity",{ascending:false}).limit(limit);if(error)throw error;const ids=(people||[]).map(x=>x.id);const [{data:topics},{data:memories}]=await Promise.all([ids.length?db.from("topic_scores").select("*").in("person_id",ids):Promise.resolve({data:[]}),ids.length?db.from("memories").select("id,person_id,raw_note,created_at").in("person_id",ids).order("created_at",{ascending:false}):Promise.resolve({data:[]})]);const byTopic=new Map<string,any[]>(),byMem=new Map<string,any[]>();for(const t of topics||[])byTopic.set(t.person_id,[...(byTopic.get(t.person_id)||[]),t]);for(const m of memories||[])byMem.set(m.person_id,[...(byMem.get(m.person_id)||[]),m]);return (people||[]).map(x=>personShape(x,byTopic.get(x.id)||[],(byMem.get(x.id)||[]).length,(byMem.get(x.id)||[])[0]||null));}
+async function searchNetwork(p:Payload){const db=getSupabaseAdmin(),query=clean(p.query),topic=clean(p.topic)||topicFromText(query);const {data,error}=await db.rpc("search_people",{search_topic:topic||null,search_text:query||null,result_limit:Number(p.limit)||100});if(error)throw error;return (data||[]).map((x:any)=>({score:clamp((x.topic_score||0)*.8+(x.computed_affinity||0)*.2),topic,topic_fit:x.topic_score||0,topic_fit_score:x.topic_score||0,topic_confidence:x.topic_confidence||0,person:{person_id:x.id,name:x.name,phone:x.phone,email:x.email,instagram:x.instagram,instagram_followers:x.instagram_followers,company:x.company,role:x.role,summary:x.summary},affinity_score:x.computed_affinity||0,computed_affinity:x.computed_affinity||0,interests:x.topic_score?[{topic,score:x.topic_score,strength:x.topic_score/20,confidence:x.topic_confidence}]:[],memories_count:0,connections_count:0}));}
+async function getPerson(p:Payload){const db=getSupabaseAdmin();const {data:person,error}=await db.from("people").select("*").eq("id",p.person_id).single();if(error)throw error;const [{data:memories},{data:topics},{data:connections}]=await Promise.all([db.from("memories").select("*").eq("person_id",person.id).order("created_at",{ascending:false}),db.from("topic_scores").select("*").eq("person_id",person.id).order("score",{ascending:false}),db.from("connections").select("*").or(`person_a_id.eq.${person.id},person_b_id.eq.${person.id}`)]);return {...personShape(person,topics||[],memories?.length||0,memories?.[0]||null,connections?.length||0),memories:(memories||[]).map(m=>({memory_id:m.id,raw_note:m.raw_note,date:m.created_at})),connections:connections||[]};}
+async function captureNote(p:Payload){const db=getSupabaseAdmin(),text=clean(p.text||p.raw_note);if(!text)throw new Error("Text required");const name=nameFromNote(text),topic=topicFromText(text);let {data:person}=await db.from("people").select("*").ilike("name",name).maybeSingle();if(!person){const created={id:id("person"),name,summary:text,last_contact:new Date().toISOString()};const r=await db.from("people").insert(created).select().single();if(r.error)throw r.error;person=r.data;}else{await db.from("people").update({summary:text,last_contact:new Date().toISOString()}).eq("id",person.id);person={...person,summary:text,last_contact:new Date().toISOString()};}
+ const memory={id:id("memory"),person_id:person.id,raw_note:text,topics:topic?[topic]:[],source:p.source||"web"};const mr=await db.from("memories").insert(memory).select().single();if(mr.error)throw mr.error;
+ if(topic){const ev=evidenceFor(text,topic),evidence={id:id("ev"),person_id:person.id,memory_id:memory.id,topic,...ev,quote:text};const er=await db.from("interest_evidence").insert(evidence);if(er.error)throw er.error;const {data:all}=await db.from("interest_evidence").select("score,confidence,quote,evidence_type").eq("person_id",person.id).eq("topic",topic);const rows=all||[],best=Math.max(...rows.map(x=>Number(x.score)||0),0),avg=rows.reduce((s,x)=>s+Number(x.score||0),0)/Math.max(rows.length,1);const score=clamp(best*.75+avg*.25+Math.min(6,Math.max(0,rows.length-1)*2));await db.from("topic_scores").upsert({person_id:person.id,topic,score,confidence:clamp(rows.reduce((s,x)=>s+Number(x.confidence||0),0)/rows.length),evidence_count:rows.length,explanation:rows.sort((a,b)=>b.score-a.score).slice(0,4).map(x=>x.quote)},{onConflict:"person_id,topic"});}
+ const {count}=await db.from("memories").select("id",{count:"exact",head:true}).eq("person_id",person.id);const affinity=affinityFor(person,count||1);await db.from("people").update({computed_affinity:affinity.score,affinity_confidence:affinity.confidence,affinity_reasons:affinity.reasons}).eq("id",person.id);return {saved:true,person:{...person,computed_affinity:affinity.score},memory:mr.data};}
+async function editPerson(p:Payload){const db=getSupabaseAdmin();if(!p.person_id)throw new Error("person_id required");const patch:any={};for(const k of ["name","phone","email","instagram","instagram_followers","company","role","where_met","summary","importance","importance_reason","last_contact","affinity_override"])if(Object.prototype.hasOwnProperty.call(p,k))patch[k]=p[k]===""&&k==="affinity_override"?null:p[k];const {data,error}=await db.from("people").update(patch).eq("id",p.person_id).select().single();if(error)throw error;return {person:data};}
+async function stats(){const db=getSupabaseAdmin();const tables=["people","memories","interest_evidence","connections","lists","events"];const counts:any={};await Promise.all(tables.map(async t=>{const {count,error}=await db.from(t).select("*",{count:"exact",head:true});if(error)throw error;counts[t]=count||0;}));return {people:counts.people,memories:counts.memories,evidence:counts.interest_evidence,connections:counts.connections,lists:counts.lists,events:counts.events,interests:counts.interest_evidence,missing_instagram:0};}
+async function listLists(){const db=getSupabaseAdmin();const {data:lists,error}=await db.from("lists").select("*").order("created_at",{ascending:false});if(error)throw error;const {data:members}=await db.from("list_members").select("list_id");return (lists||[]).map(l=>({list_id:l.id,name:l.name,topic:l.topic,description:l.description,created_at:l.created_at,member_count:(members||[]).filter(m=>m.list_id===l.id).length}));}
+async function createList(p:Payload){const db=getSupabaseAdmin();const row={id:id("list"),name:clean(p.name),topic:clean(p.topic),description:clean(p.description)};if(!row.name)throw new Error("List name required");const {data,error}=await db.from("lists").insert(row).select().single();if(error)throw error;return {list_id:data.id,...data};}
+async function addToList(p:Payload){const db=getSupabaseAdmin();const row={id:id("lm"),list_id:p.list_id,person_id:p.person_id,status:p.status||"candidate",notes:p.notes||""};const {data,error}=await db.from("list_members").upsert(row,{onConflict:"list_id,person_id"}).select().single();if(error)throw error;return data;}
+async function getList(p:Payload){const db=getSupabaseAdmin();const {data:list,error}=await db.from("lists").select("*").eq("id",p.list_id).single();if(error)throw error;const {data:members}=await db.from("list_members").select("*").eq("list_id",p.list_id);const ids=(members||[]).map(x=>x.person_id);const {data:people}=ids.length?await db.from("people").select("*").in("id",ids):{data:[]};const index=new Map((people||[]).map(x=>[x.id,x]));return {list:{...list,list_id:list.id},members:(members||[]).map(m=>({...m,contact:index.get(m.person_id)?personShape(index.get(m.person_id)):null})),recommendations:[]};}
+async function topicScores(p:Payload){const db=getSupabaseAdmin();const {data,error}=await db.from("topic_scores").select("*").eq("person_id",p.person_id).order("score",{ascending:false});if(error)throw error;return data||[];}
 
-function clearReadCache() {
-  responseCache.clear();
-}
-
-async function callAppsScript(body: CrmBody, url: string, apiKey: string) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 25_000);
-  try {
-    const response = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...body, api_key: apiKey }),
-      redirect: "follow",
-      cache: "no-store",
-      signal: controller.signal,
-    });
-
-    const text = await response.text();
-    let data: unknown;
-    try {
-      data = JSON.parse(text);
-    } catch {
-      data = { ok: false, error: text || "Invalid CRM response." };
-    }
-
-    if (!response.ok) {
-      throw new Error(
-        data && typeof data === "object" && "error" in data
-          ? String((data as { error?: unknown }).error || "CRM request failed")
-          : `CRM request failed (${response.status})`
-      );
-    }
-    return data;
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-async function cachedRead(body: CrmBody, url: string, apiKey: string) {
-  const action = String(body.action || "");
-  const ttl = READ_TTL[action];
-  if (!ttl) return callAppsScript(body, url, apiKey);
-
-  const key = cacheKey(body);
-  const now = Date.now();
-  const existing = responseCache.get(key);
-
-  if (existing && existing.expiresAt > now) return existing.data;
-
-  const currentRequest = inflight.get(key);
-  if (currentRequest) return currentRequest;
-
-  const refresh = callAppsScript(body, url, apiKey)
-    .then(data => {
-      responseCache.set(key, {
-        data,
-        expiresAt: Date.now() + ttl,
-        staleUntil: Date.now() + ttl * 4,
-      });
-      return data;
-    })
-    .finally(() => inflight.delete(key));
-
-  inflight.set(key, refresh);
-
-  if (existing && existing.staleUntil > now) {
-    void refresh.catch(() => undefined);
-    return existing.data;
-  }
-
-  return refresh;
-}
-
-export async function POST(request: NextRequest) {
-  try {
-    const url = process.env.CRM_APPS_SCRIPT_URL;
-    const apiKey = process.env.CRM_API_KEY;
-    if (!url || !apiKey) {
-      return NextResponse.json({ ok: false, error: "Server configuration is incomplete." }, { status: 500 });
-    }
-
-    const body = await request.json() as CrmBody;
-
-    if (body.action === "search_network" && body.payload?.query) {
-      body.payload.query = normalizeSearchQuery(body.payload.query);
-    }
-
-    const data = MUTATIONS.has(String(body.action || ""))
-      ? await callAppsScript(body, url, apiKey)
-      : await cachedRead(body, url, apiKey);
-
-    if (MUTATIONS.has(String(body.action || ""))) clearReadCache();
-
-    return NextResponse.json(data, {
-      status: 200,
-      headers: {
-        "Cache-Control": "private, no-store",
-        "X-CRM-Performance": READ_TTL[String(body.action || "")] ? "cached-read" : "direct",
-      },
-    });
-  } catch (error) {
-    const timedOut = error instanceof Error && error.name === "AbortError";
-    return NextResponse.json(
-      {
-        ok: false,
-        error: timedOut
-          ? "The CRM backend took too long to respond. Please retry once."
-          : error instanceof Error ? error.message : "Unexpected server error.",
-      },
-      { status: timedOut ? 504 : 500 }
-    );
-  }
-}
+async function handle(action:string,p:Payload){switch(action){case"list_people":return listPeople(p);case"search_network":return searchNetwork(p);case"get_person":return getPerson(p);case"capture_note":return captureNote(p);case"edit_person":case"quick_add":return editPerson(p);case"stats":return stats();case"list_lists":return listLists();case"create_list":return createList(p);case"add_to_list":return addToList(p);case"get_list":return getList(p);case"topic_scores":return topicScores(p);case"set_affinity":return editPerson({...p,affinity_override:p.affinity_score});case"clear_affinity_override":return editPerson({...p,affinity_override:null});default:throw new Error(`Supabase action not implemented yet: ${action}`);}}
+export async function POST(request:NextRequest){try{const body=await request.json();const action=clean(body.action),payload=body.payload||{};const data=await handle(action,payload);return NextResponse.json({ok:true,action,backend:"supabase",data},{headers:{"Cache-Control":"private, no-store","X-CRM-Backend":"supabase"}});}catch(error){return NextResponse.json({ok:false,backend:"supabase",error:error instanceof Error?error.message:"Unexpected server error"},{status:500});}}
